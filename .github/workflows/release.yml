@@ -1,0 +1,92 @@
+name: Android APK
+
+on:
+    push:
+        branches: [main]
+        tags: ["v*"]
+
+permissions:
+    contents: write
+
+jobs:
+    build-android:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up Java
+              uses: actions/setup-java@v4
+              with:
+                  distribution: temurin
+                  java-version: "17"
+
+            - name: Set up Flutter
+              uses: subosito/flutter-action@v2
+              with:
+                  channel: stable
+
+            - name: Generate env.dart from secrets
+              run: |
+                  mkdir -p lib/config
+                  # Write the static class definition using a quoted heredoc (disables expansion)
+                  cat > lib/config/env.dart << 'EOF'
+                  class Auth0Env {
+                    final String domain;
+                    final String clientId;
+                    final String scheme;
+                    final String audience;
+                    const Auth0Env({
+                      required this.domain,
+                      required this.clientId,
+                      required this.scheme,
+                      required this.audience,
+                    });
+                  }
+                  EOF
+
+                  # Append the dynamic values using echo to guarantee shell expansion
+                  echo "const auth0Env = Auth0Env(" >> lib/config/env.dart
+                  echo "  domain: '$AUTH0_DOMAIN'," >> lib/config/env.dart
+                  echo "  clientId: '$AUTH0_CLIENT_ID'," >> lib/config/env.dart
+                  echo "  scheme: '$AUTH0_SCHEME'," >> lib/config/env.dart
+                  echo "  audience: '$AUTH0_AUDIENCE'," >> lib/config/env.dart
+                  echo ");" >> lib/config/env.dart
+                  echo "const backendBaseUrlEnv = '$BACKEND_BASE_URL';" >> lib/config/env.dart
+              env:
+                  AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+                  AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+                  AUTH0_SCHEME: ${{ secrets.AUTH0_SCHEME }}
+                  AUTH0_AUDIENCE: ${{ secrets.AUTH0_AUDIENCE }}
+                  BACKEND_BASE_URL: ${{ secrets.BACKEND_BASE_URL }}
+
+            - name: Flutter pub get
+              run: flutter pub get
+
+            - name: Decode Android keystore
+              run: |
+                  echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+              env:
+                  ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+            - name: Build signed release APK
+              env:
+                  ANDROID_KEYSTORE_PATH: release.keystore
+                  ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+                  ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+                  ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+              run: flutter build apk --release
+
+            - name: Upload artifact (main branch builds)
+              if: github.ref == 'refs/heads/main'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: app-release-apk
+                  path: build/app/outputs/flutter-apk/app-release.apk
+
+            - name: Create GitHub Release (on tag)
+              if: startsWith(github.ref, 'refs/tags/')
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: build/app/outputs/flutter-apk/app-release.apk
+                  generate_release_notes: true
